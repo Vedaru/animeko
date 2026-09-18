@@ -128,6 +128,7 @@ import me.him188.ani.utils.logging.trace
 import me.him188.ani.utils.logging.warn
 import me.him188.ani.utils.platform.currentPlatform
 import me.him188.ani.utils.platform.currentPlatformDesktop
+import me.him188.ani.utils.platform.isLinux
 import me.him188.ani.utils.platform.isMacOS
 import me.him188.ani.utils.platform.isWindows
 import me.him188.ani.utils.video.enhancement.shader.provider.VideoEnhancementShaderProvider
@@ -214,8 +215,44 @@ object AniDesktop {
         }
     }
 
+    /**
+     * Turns Skiko's GLX vsync off on Linux to avoid a hard UI freeze.
+     *
+     * With vsync enabled Skiko presents through `glXSwapBuffers(interval = 1)`, and Compose
+     * Desktop dispatches frame presentation on the AWT event thread. Under XWayland the swap is
+     * throttled by the Wayland compositor, which has no X11-style frame callback that would
+     * release a client the compositor stops presenting for, so the swap can block forever. The
+     * AWT event thread then parks in
+     * `org.jetbrains.skiko.redrawer.LinuxOpenGLRedrawerKt.swapBuffers` and every later UI event
+     * queues up behind it: the window stays on screen but stops responding entirely.
+     * `skiko.vsync.enabled=false` only removes that wait, the render API stays OpenGL.
+     *
+     * Falling back to software rendering is not an alternative here: mpv shares its output
+     * texture with Skiko through the GLX context, so a software redrawer makes video playback
+     * fail to initialize.
+     *
+     * Must run before Skiko reads its properties, because `SkikoProperties` snapshots
+     * `System.getProperties()` when the object is initialized, hence the call at the top of
+     * [main]. An explicit `-Dskiko.vsync.enabled=...` always takes precedence.
+     */
+    private fun applyLinuxVsyncWorkaround() {
+        if (!currentPlatformDesktop().isLinux()) {
+            return
+        }
+        // Wayland sessions run the app through XWayland, which is where this was observed.
+        if (System.getenv("WAYLAND_DISPLAY").isNullOrEmpty()) {
+            return
+        }
+        if (System.getProperty("skiko.vsync.enabled") != null) {
+            return
+        }
+        System.setProperty("skiko.vsync.enabled", "false")
+    }
+
     @JvmStatic
     fun main(args: Array<String>) {
+        applyLinuxVsyncWorkaround()
+
         val startupTimeMonitor = StartupTimeMonitor()
 
         val originalExceptionHandler = Thread.currentThread().uncaughtExceptionHandler
